@@ -183,6 +183,8 @@ def handle_mention(event, say, client, context):
 
 • **check standings** → portfolio value leaderboard
 
+• **check positions** → show all user positions
+
 • **close** CRYPTO/USDT → closes all positions for that pair, realizes PNL
 
 • **price** CRYPTO → current spot price (e.g. price DOGE)
@@ -193,8 +195,35 @@ Most cryptos supported by Coinbase spot prices work (SOL, DOGE, AVAX, XRP, ADA, 
 Leverage: 1x – 50x. All values are simulated — no real money involved!
 """
         say(msg)
-    
-    elif text == "check standings":
+
+    elif text.lower() == "check positions":
+        msg = "User Positions:\n"
+        for u, udata in data["users"].items():
+            user_info = client.users_info(user=u)
+            username = user_info["user"]["name"]
+            msg += f"**{username}**:\n"
+            if udata["positions"]:
+                for pos in udata["positions"]:
+                    try:
+                        cur = get_price(pos["crypto"])
+                    except Exception:
+                        msg += "Error fetching price for positions.\n"
+                        break
+                    pnl_pct = (cur - pos["entry"]) / pos["entry"] if pos["side"] == "long" else (pos["entry"] - cur) / pos["entry"]
+                    pnl = pnl_pct * pos["margin"] * pos["lev"]
+                    if pnl < -pos["margin"]:
+                        pnl = -pos["margin"]
+                    cur_str = f"${cur:,.2f}" if isinstance(cur, float) else str(cur)
+                    msg += (f"• **{pos['side'].upper()} {pos['crypto']}/USDT** "
+                            f"@{pos['lev']}x | Margin: ${pos['margin']:.2f} | "
+                            f"Entry: ${pos['entry']:,.2f} | Current: {cur_str} | "
+                            f"PNL: **${pnl:+.2f}**\n")
+            else:
+                msg += "No open positions.\n"
+            msg += "\n"
+        say(msg)
+
+    elif text.lower() == "check standings":
         standings = []
         for u, udata in data["users"].items():
             total = udata["usd"]
