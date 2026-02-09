@@ -183,6 +183,8 @@ def handle_mention(event, say, client, context):
 
 • **check standings** → portfolio value leaderboard
 
+• **check positions** → show all user positions
+
 • **close** CRYPTO/USDT → closes all positions for that pair, realizes PNL
 
 • **price** CRYPTO → current spot price (e.g. price DOGE)
@@ -193,8 +195,35 @@ Most cryptos supported by Coinbase spot prices work (SOL, DOGE, AVAX, XRP, ADA, 
 Leverage: 1x – 50x. All values are simulated — no real money involved!
 """
         say(msg)
-    
-    elif text == "check standings":
+
+    elif text.lower() == "check positions":
+        msg = "User Positions:\n"
+        for u, udata in data["users"].items():
+            user_info = client.users_info(user=u)
+            username = user_info["user"]["name"]
+            msg += f"**{username}**:\n"
+            if udata["positions"]:
+                for pos in udata["positions"]:
+                    try:
+                        cur = get_price(pos["crypto"])
+                    except Exception:
+                        msg += "Error fetching price for positions.\n"
+                        break
+                    pnl_pct = (cur - pos["entry"]) / pos["entry"] if pos["side"] == "long" else (pos["entry"] - cur) / pos["entry"]
+                    pnl = pnl_pct * pos["margin"] * pos["lev"]
+                    if pnl < -pos["margin"]:
+                        pnl = -pos["margin"]
+                    cur_str = f"${cur:,.2f}" if isinstance(cur, float) else str(cur)
+                    msg += (f"• **{pos['side'].upper()} {pos['crypto']}/USDT** "
+                            f"@{pos['lev']}x | Margin: ${pos['margin']:.2f} | "
+                            f"Entry: ${pos['entry']:,.2f} | Current: {cur_str} | "
+                            f"PNL: **${pnl:+.2f}**\n")
+            else:
+                msg += "No open positions.\n"
+            msg += "\n"
+        say(msg)
+
+    elif text.lower() == "check standings":
         standings = []
         for u, udata in data["users"].items():
             total = udata["usd"]
@@ -217,6 +246,38 @@ Leverage: 1x – 50x. All values are simulated — no real money involved!
         for name, val in standings:
             msg += f"{name} = ${val:.2f}\n"
         say(msg)
+
+    elif text.lower().startswith("brag "):
+        crypto_raw = text[5:].strip().upper()
+        crypto = crypto_raw.rstrip("/USDT")  # allow "brag SOL/USDT" or "brag SOL"
+        positions = data["users"][user]["positions"]
+        brag_msg = ""
+        found_pos = False
+
+        for pos in positions:
+            if pos["crypto"] == crypto:
+                found_pos = True
+                try:
+                    cur = get_price(crypto)
+                except ValueError as e:
+                    say(str(e))
+                    return
+                pnl_pct = (cur - pos["entry"]) / pos["entry"] if pos["side"] == "long" else (pos["entry"] - cur) / pos["entry"]
+                pnl = pnl_pct * pos["margin"] * pos["lev"]
+                if pnl < -pos["margin"]:
+                    pnl = -pos["margin"]
+
+                brag_msg += f"My {pos['side']} position in {crypto}/USDT is on 🔥!\n"
+                brag_msg += f"Entry price: ${pos['entry']:,.2f}\n"
+                brag_msg += f"Current price: ${cur:,.2f}\n"
+                brag_msg += f"PNL: ${pnl:+.2f}\n"
+                brag_msg += "🚀🚀🚀 TO THE MOON! 🚀🚀🚀" + "\n"
+
+        if not found_pos:
+            say(f"You don't have an open position in {crypto}/USDT.")
+            return
+
+        say(brag_msg)
 
     elif text.startswith("admin set "):
         if user != os.environ.get("ADMIN_ID"):
