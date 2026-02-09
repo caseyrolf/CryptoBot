@@ -295,6 +295,21 @@ Leverage: 1x – 50x. All values are simulated — no real money involved!
         else:
             say("Usage: admin set @user $amount")
 
+    elif text.startswith("admin add "):
+        if user != os.environ.get("ADMIN_ID"):
+            say("You are not an admin.")
+            return
+        match = re.match(r"admin add <@(\w+)> \$(\d+)", text)
+        if match:
+            target = match.group(1)
+            amt = float(match.group(2))
+            if target not in data["users"]:
+                data["users"][target] = {"usd": 0.0, "positions": []}
+            data["users"][target]["usd"] += amt
+            save_data()
+            say(f"Added ${amt:.2f} to <@{target}>'s USD balance")
+        else:
+            say("Usage: admin add @user $amount")
     else:
         say("Unknown command. Try '@cryptobot help'.")
 
