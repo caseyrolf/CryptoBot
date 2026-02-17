@@ -50,11 +50,16 @@ def handle_mention(event, say, client, context):
         data["users"][user] = {"usd": 0.0, "positions": []}
         save_data()
 
-    # Updated buy/sell regex: allows any CRYPTO and variable leverage
-    buy_sell_pattern = r"(buy|sell) \$(\d+(?:\.\d+)?) of ([A-Z]{2,10})/USDT(?:\s+(\d+)x)?"
-    match = re.match(buy_sell_pattern, text, re.IGNORECASE)
-    if match:
-        side_str, margin_str, crypto_raw, lev_str = match.groups()
+    # Flexible buy/sell parsing: allows any order without requiring 'of'
+    side_match = re.search(r'\b(buy|sell)\b', text, re.IGNORECASE)
+    margin_match = re.search(r'\$([\d.]+)', text)
+    crypto_match = re.search(r'\b([A-Z]{2,10})/USDT\b', text)
+    leverage_match = re.search(r'\b(\d+)x\b', text)
+    if side_match and margin_match and crypto_match:
+        side_str = side_match.group(1)
+        margin_str = margin_match.group(1)
+        crypto_raw = crypto_match.group(1)
+        lev_str = leverage_match.group(1) if leverage_match else None
         side = "long" if side_str.lower() == "buy" else "short"
         margin = float(margin_str)
         crypto = crypto_raw.upper()   # e.g. SOL, DOGE, AVAX
