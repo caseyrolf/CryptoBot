@@ -50,11 +50,16 @@ def handle_mention(event, say, client, context):
         data["users"][user] = {"usd": 0.0, "positions": []}
         save_data()
 
-    # Updated buy/sell regex: allows any CRYPTO and variable leverage
-    buy_sell_pattern = r"(buy|sell) \$(\d+(?:\.\d+)?) of ([A-Z]{2,10})/USDT(?:\s+(\d+)x)?"
-    match = re.match(buy_sell_pattern, text, re.IGNORECASE)
-    if match:
-        side_str, margin_str, crypto_raw, lev_str = match.groups()
+    # Flexible buy/sell parsing: allows any order without requiring 'of'
+    side_match = re.search(r'\b(buy|sell)\b', text, re.IGNORECASE)
+    margin_match = re.search(r'\$([\d.]+)', text)
+    crypto_match = re.search(r'\b([A-Z]{2,10})/USDT\b', text)
+    leverage_match = re.search(r'\b(\d+)x\b', text)
+    if side_match and margin_match and crypto_match:
+        side_str = side_match.group(1)
+        margin_str = margin_match.group(1)
+        crypto_raw = crypto_match.group(1)
+        lev_str = leverage_match.group(1) if leverage_match else None
         side = "long" if side_str.lower() == "buy" else "short"
         margin = float(margin_str)
         crypto = crypto_raw.upper()   # e.g. SOL, DOGE, AVAX
@@ -295,6 +300,21 @@ Leverage: 1x – 50x. All values are simulated — no real money involved!
         else:
             say("Usage: admin set @user $amount")
 
+    elif text.startswith("admin add "):
+        if user != os.environ.get("ADMIN_ID"):
+            say("You are not an admin.")
+            return
+        match = re.match(r"admin add <@(\w+)> \$(\d+)", text)
+        if match:
+            target = match.group(1)
+            amt = float(match.group(2))
+            if target not in data["users"]:
+                data["users"][target] = {"usd": 0.0, "positions": []}
+            data["users"][target]["usd"] += amt
+            save_data()
+            say(f"Added ${amt:.2f} to <@{target}>'s USD balance")
+        else:
+            say("Usage: admin add @user $amount")
     else:
         say("Unknown command. Try '@cryptobot help'.")
 
