@@ -4,7 +4,7 @@ import time
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 from dotenv import load_dotenv
-from coinbase import get_price
+from coinbase import get_price, should_liquidate
 from store import Direction, init_store, Position, next_position_id, save_data, get_users, ensure_user, UserData
 
 load_dotenv()
@@ -49,6 +49,34 @@ def handle_mention(event, say, client, context):
     mention_pattern = rf'<@{re.escape(bot_user_id)}(?:\|[^>]*)?>\s*'
     text = re.sub(mention_pattern, '', event["text"], count=1).strip()
     user_data: UserData = ensure_user(user)
+
+    # Auto-liquidate positions on every mention.
+    changed = False
+    liquidation_msgs = []
+    for uid, udata in get_users().items():
+        survivors = []
+        for pos in udata.positions:
+            try:
+                liquidated = should_liquidate(pos)
+            except ValueError:
+                survivors.append(pos)
+                continue
+
+            if liquidated:
+                changed = True
+                liquidation_msgs.append(
+                    f"Position `{pos.position_id}` for <@{uid}> was liquidated "
+                    f"(**{pos.side.value} {pos.crypto}/USDT**). "
+                    f"Realized PNL: **${(-pos.margin):+.2f}**."
+                )
+            else:
+                survivors.append(pos)
+        udata.positions = survivors
+
+    if changed:
+        save_data()
+        for msg in liquidation_msgs:
+            say(msg)
 
     # Flexible buy/sell parsing: allows any order without requiring 'of'
     side_match = re.search(r'\b(buy|sell|long|short)\b', text, re.IGNORECASE)

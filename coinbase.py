@@ -34,18 +34,22 @@ def should_liquidate(position: Position) -> bool:
     now = int(time.time())
     start_ts = position.timestamp if position.timestamp is not None else now
 
-    if start_ts >= now:
-        current = get_price(position.crypto)
-        if position.side == Direction.LONG:
-            return current <= liq_price
-        return current >= liq_price
+    try:
+        if start_ts >= now:
+            current = get_price(position.crypto)
+            if position.side == Direction.LONG:
+                return current <= liq_price
+            return current >= liq_price
 
-    low, high = _price_extremes_since(position.crypto, start_ts, now)
-    if low is None or high is None:
-        current = get_price(position.crypto)
-        if position.side == Direction.LONG:
-            return current <= liq_price
-        return current >= liq_price
+        low, high = _price_extremes_since(position.crypto, start_ts, now)
+        if low is None or high is None:
+            current = get_price(position.crypto)
+            if position.side == Direction.LONG:
+                return current <= liq_price
+            return current >= liq_price
+    except ValueError:
+        # Fail-safe: if Coinbase APIs are unavailable, do not liquidate.
+        return False
 
     if position.side == Direction.LONG:
         return low <= liq_price
