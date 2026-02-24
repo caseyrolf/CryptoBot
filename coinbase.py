@@ -1,5 +1,6 @@
 import time
 from datetime import datetime, timezone
+from typing import Optional
 
 import requests
 
@@ -30,30 +31,141 @@ def should_liquidate(position: Position) -> bool:
     LONG: liquidate if low <= liquidation price.
     SHORT: liquidate if high >= liquidation price.
     """
-    liq_price = position.liquidation_price()
-    now = int(time.time())
-    start_ts = position.timestamp if position.timestamp is not None else now
-
-    try:
-        if start_ts >= now:
-            current = get_price(position.crypto)
-            if position.side == Direction.LONG:
-                return current <= liq_price
-            return current >= liq_price
-
-        low, high = _price_extremes_since(position.crypto, start_ts, now)
-        if low is None or high is None:
-            current = get_price(position.crypto)
-            if position.side == Direction.LONG:
-                return current <= liq_price
-            return current >= liq_price
-    except ValueError:
-        # Fail-safe: if Coinbase APIs are unavailable, do not liquidate.
+    if position.timestamp is None:
         return False
 
-    if position.side == Direction.LONG:
-        return low <= liq_price
-    return high >= liq_price
+    liq_price = position.liquidation_price()
+    now = int(time.time())
+    trigger_on_or_above = position.side == Direction.SHORT
+    return _was_trigger_hit(
+        crypto=position.crypto,
+        price=liq_price,
+        trigger_on_or_above=trigger_on_or_above,
+        start_ts=position.timestamp,
+        stop_ts=now,
+    )
+
+
+def should_fill_limit_order(order: Position) -> Optional[int]:
+    """
+    Check if a limit order threshold was crossed since order.timestamp.
+    Returns the first candle timestamp where the threshold was hit, or None.
+    LONG limit: fill if low <= entry.
+    SHORT limit: fill if high >= entry.
+    """
+    if order.timestamp is None:
+        return None
+
+    limit_price = order.entry
+    now = int(time.time())
+    trigger_on_or_above = order.side == Direction.SHORT
+    try:
+        return _first_trigger_hit_timestamp(
+            crypto=order.crypto,
+            price=limit_price,
+            trigger_on_or_above=trigger_on_or_above,
+            start_ts=order.timestamp,
+            stop_ts=now,
+        )
+    except ValueError:
+        return None
+
+
+def _was_trigger_hit(
+    crypto: str,
+    price: float,
+    trigger_on_or_above: bool,
+    start_ts: int,
+    stop_ts: int,
+) -> bool:
+    try:
+        if start_ts >= stop_ts:
+            current = get_price(crypto)
+            if trigger_on_or_above:
+                return current >= price
+            return current <= price
+
+        low, high = _price_extremes_since(crypto, start_ts, stop_ts)
+        if low is None or high is None:
+            current = get_price(crypto)
+            if trigger_on_or_above:
+                return current >= price
+            return current <= price
+    except ValueError:
+        # Fail-safe: if Coinbase APIs are unavailable, do not trigger.
+        return False
+
+    if trigger_on_or_above:
+        return high >= price
+    return low <= price
+
+
+def _first_trigger_hit_timestamp(
+    crypto: str,
+    price: float,
+    trigger_on_or_above: bool,
+    start_ts: int,
+    stop_ts: int,
+) -> Optional[int]:
+    if start_ts >= stop_ts:
+        current = get_price(crypto)
+        if trigger_on_or_above:
+            return stop_ts if current >= price else None
+        return stop_ts if current <= price else None
+
+    product = f"{crypto.upper()}-USD"
+    granularity = _choose_granularity(start_ts, stop_ts)
+    chunk_seconds = granularity * MAX_CANDLES_PER_REQUEST
+
+    saw_candles = False
+    cursor = start_ts
+    while cursor < stop_ts:
+        chunk_end = min(stop_ts, cursor + chunk_seconds)
+        params = {
+            "start": _to_iso8601(cursor),
+            "end": _to_iso8601(chunk_end),
+            "granularity": granularity,
+        }
+        try:
+            resp = requests.get(CANDLES_URL.format(product=product), params=params, timeout=10)
+            resp.raise_for_status()
+            candles = resp.json()
+        except Exception as e:
+            raise ValueError(
+                f"Could not fetch candle data for {crypto.upper()}/USD. Error: {str(e)}"
+            )
+
+        if isinstance(candles, list) and candles:
+            saw_candles = True
+            ordered = sorted(
+                (
+                    candle
+                    for candle in candles
+                    if isinstance(candle, list) and len(candle) >= 3
+                ),
+                key=lambda candle: int(candle[0]),
+            )
+            for candle in ordered:
+                candle_ts = int(candle[0])
+                if candle_ts < start_ts or candle_ts > stop_ts:
+                    continue
+                low = float(candle[1])
+                high = float(candle[2])
+                if trigger_on_or_above and high >= price:
+                    return candle_ts
+                if not trigger_on_or_above and low <= price:
+                    return candle_ts
+
+        cursor = chunk_end
+
+    # Fall back to spot if no candle data was available for the lookback window.
+    if not saw_candles:
+        current = get_price(crypto)
+        if trigger_on_or_above:
+            return stop_ts if current >= price else None
+        return stop_ts if current <= price else None
+
+    return None
 
 
 def _price_extremes_since(crypto: str, start_ts: int, end_ts: int) -> tuple[float | None, float | None]:

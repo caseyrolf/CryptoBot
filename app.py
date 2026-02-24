@@ -1,26 +1,29 @@
 import os
 import re
+import threading
 import time
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 from dotenv import load_dotenv
-from coinbase import get_price, should_liquidate
+from coinbase import get_price, should_fill_limit_order, should_liquidate
 from store import Direction, init_store, Position, next_position_id, save_data, get_users, ensure_user, UserData
 
 load_dotenv()
 init_store()
 
-app = App(
-    token=os.environ.get("SLACK_BOT_TOKEN"),
-    signing_secret=os.environ.get("SLACK_SIGNING_SECRET")
-)
+_TOKEN = os.environ.get("SLACK_BOT_TOKEN")
+_SIGNING_SECRET = os.environ.get("SLACK_SIGNING_SECRET")
+_CHANNEL_ID = os.environ.get("SLACK_CHANNEL_ID")
+
+app = App(token=_TOKEN, signing_secret=_SIGNING_SECRET)
+
 
 USAGE = """**Crypto Futures Simulator Commands** (pretend trading):
 
-• **buy** $AMOUNT of CRYPTO/USDT [LEVERAGE]x  
+• **buy** $AMOUNT of CRYPTO/USDT [LEVERAGE]x [at $PRICE]
   e.g. buy $100 of SOL/USDT 20x    (default 10x if omitted)
 
-• **sell** $AMOUNT of CRYPTO/USDT [LEVERAGE]x  
+• **sell** $AMOUNT of CRYPTO/USDT [LEVERAGE]x [at $PRICE]
   (opens short position)
 
 • **check balance** → shows USD + all positions with PNL
@@ -42,26 +45,32 @@ Leverage: 1x – 50x. All values are simulated — no real money involved!
 """
 
 
-@app.event("app_mention")
-def handle_mention(event, say, client, context):
-    user = event["user"]
-    bot_user_id = context["bot_user_id"] 
-    mention_pattern = rf'<@{re.escape(bot_user_id)}(?:\|[^>]*)?>\s*'
-    text = re.sub(mention_pattern, '', event["text"], count=1).strip()
-    user_data: UserData = ensure_user(user)
-
-    # Auto-liquidate positions on every mention.
+def _update_positions() -> tuple[list[str], list[str]]:
     changed = False
-    liquidation_msgs = []
+    fill_msgs: list[str] = []
+    liquidation_msgs: list[str] = []
+
     for uid, udata in get_users().items():
+        remaining_orders = []
+        for order in udata.orders:
+            fill_ts = should_fill_limit_order(order)
+            if fill_ts is not None:
+                changed = True
+                order.timestamp = fill_ts
+                udata.positions.append(order)
+                fill_msgs.append(
+                    f"Limit order `{order.position_id}` for <@{uid}> filled "
+                    f"(**{order.side.value} {order.crypto}/USDT**). "
+                    f"Entry price: **${order.entry:,.2f}** | "
+                    f"Liquidation price: **${order.liquidation_price():,.2f}**."
+                )
+            else:
+                remaining_orders.append(order)
+        udata.orders = remaining_orders
+
         survivors = []
         for pos in udata.positions:
-            try:
-                liquidated = should_liquidate(pos)
-            except ValueError:
-                survivors.append(pos)
-                continue
-
+            liquidated: bool = should_liquidate(pos)
             if liquidated:
                 changed = True
                 liquidation_msgs.append(
@@ -75,14 +84,48 @@ def handle_mention(event, say, client, context):
 
     if changed:
         save_data()
-        for msg in liquidation_msgs:
-            say(msg)
+
+    return fill_msgs, liquidation_msgs
+
+
+def _background_position_updater():
+    while True:
+        time.sleep(600)
+        fill_msgs, liquidation_msgs = _update_positions()
+        if _CHANNEL_ID:
+            for msg in fill_msgs:
+                try:
+                    app.client.chat_postMessage(channel=_CHANNEL_ID, text=msg)
+                except Exception as e:
+                    print(f"Failed to post fill alert to Slack: {e}")
+            for msg in liquidation_msgs:
+                try:
+                    app.client.chat_postMessage(channel=_CHANNEL_ID, text=msg)
+                except Exception as e:
+                    print(f"Failed to post liquidation alert to Slack: {e}")
+
+
+@app.event("app_mention")
+def handle_mention(event, say, client, context):
+    user = event["user"]
+    bot_user_id = context["bot_user_id"] 
+    mention_pattern = rf'<@{re.escape(bot_user_id)}(?:\|[^>]*)?>\s*'
+    text = re.sub(mention_pattern, '', event["text"], count=1).strip()
+    user_data: UserData = ensure_user(user)
+
+    # Auto-fill limit orders and auto-liquidate positions on every mention.
+    fill_msgs, liquidation_msgs = _update_positions()
+    for msg in fill_msgs:
+        say(msg)
+    for msg in liquidation_msgs:
+        say(msg)
 
     # Flexible buy/sell parsing: allows any order without requiring 'of'
     side_match = re.search(r'\b(buy|sell|long|short)\b', text, re.IGNORECASE)
     margin_match = re.search(r'\$([\d.]+)', text)
     crypto_match = re.search(r'\b([A-Z]{2,10})/USDT\b', text, re.IGNORECASE)
     leverage_match = re.search(r'\b(\d+)x\b', text)
+    limit_price_match = re.search(r'\bat\s+\$([\d.]+)\b', text, re.IGNORECASE)
     if side_match and margin_match and crypto_match:
         side_str = side_match.group(1)
         margin_str = margin_match.group(1)
@@ -91,6 +134,7 @@ def handle_mention(event, say, client, context):
         side = Direction.LONG if side_str.lower() in ("buy", "long") else Direction.SHORT
         margin = float(margin_str)
         leverage = int(lev_str) if lev_str else 10   # default 10x if omitted
+        limit_price = float(limit_price_match.group(1)) if limit_price_match else None
 
         if not (1 <= leverage <= 50):
             say("Leverage must be between 1x and 50x.")
@@ -99,35 +143,59 @@ def handle_mention(event, say, client, context):
         if margin <= 0:
             say("Margin amount must be positive.")
             return
+        if limit_price is not None and limit_price <= 0:
+            say("Limit price must be positive.")
+            return
 
         if user_data.usd < margin:
             say(f"Insufficient USD balance. You have ${user_data.usd:.2f}")
             return
 
         try:
-            entry_price = get_price(crypto)
+            spot_price = get_price(crypto)
         except ValueError as e:
             say(str(e))
             return
+
+        if limit_price is not None:
+            if side == Direction.LONG and spot_price < limit_price:
+                say(f"Cannot place LONG limit at ${limit_price:,.2f}: current price is already below it (${spot_price:,.2f}).")
+                return
+            if side == Direction.SHORT and spot_price > limit_price:
+                say(f"Cannot place SHORT limit at ${limit_price:,.2f}: current price is already above it (${spot_price:,.2f}).")
+                return
 
         pos = Position(
             position_id=next_position_id(),
             crypto=crypto,
             side=side,
             timestamp=int(time.time()),
-            entry=entry_price,
+            entry=limit_price if limit_price is not None else 0.0,
             margin=margin,
             lev=leverage,
         )
-        user_data.positions.append(pos)
+
+        if limit_price is None:
+            pos.entry = spot_price
+            user_data.positions.append(pos)
+        else:
+            user_data.orders.append(pos)
+
         user_data.usd -= margin
         save_data()
 
-        say(f"Opened **{side.value}** position on **{crypto}/USDT** "
-            f"(ID: `{pos.position_id}`) "
-            f"with **${margin:.2f}** margin at **{leverage}x** leverage. "
-            f"Entry price: **${entry_price:,.2f}**"
-            f"Liquidation price: **${pos.liquidation_price():,.2f}**")
+        if limit_price is None:
+            say(f"Opened **{side.value}** position on **{crypto}/USDT** "
+                f"(ID: `{pos.position_id}`) "
+                f"with **${margin:.2f}** margin at **{leverage}x** leverage. "
+                f"Entry price: **${spot_price:,.2f}** "
+                f"Liquidation price: **${pos.liquidation_price():,.2f}**")
+        else:
+            say(f"Placed **{side.value}** limit order on **{crypto}/USDT** "
+                f"(ID: `{pos.position_id}`) "
+                f"with **${margin:.2f}** margin at **{leverage}x** leverage "
+                f"to fill at **${limit_price:,.2f}**. "
+                f"Estimated liquidation price: **${pos.liquidation_price():,.2f}**")
 
     # For close command: support closing by ID or by symbol
     elif text.lower().startswith("close "):
@@ -234,6 +302,14 @@ def handle_mention(event, say, client, context):
                         f"PNL: **${pnl:+.2f}**\n")
         else:
             msg += "No open positions."
+
+        if user_data.orders:
+            msg += "\n\n**Pending Limit Orders**:\n"
+            for order in user_data.orders:
+                msg += (f"• **{order.side.value} {order.crypto}/USDT** "
+                        f"(ID: `{order.position_id}`) @{order.lev}x | Margin: ${order.margin:.2f} | "
+                        f"Limit: ${order.entry:,.2f} | "
+                        f"Liquidation: ${order.liquidation_price():,.2f}\n")
         say(msg)
 
     # In help command – update syntax
@@ -271,6 +347,8 @@ def handle_mention(event, say, client, context):
         standings = []
         for u, udata in get_users().items():
             total = udata.usd
+            for order in udata.orders:
+                total += order.margin
             for pos in udata.positions:
                 try:
                     cur = get_price(pos.crypto)
@@ -357,6 +435,7 @@ def handle_mention(event, say, client, context):
 
 
 if __name__ == "__main__":
+    threading.Thread(target=_background_position_updater, daemon=True).start()
     handler = SocketModeHandler(app, os.environ["SLACK_APP_TOKEN"])
     handler.start()
 

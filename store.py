@@ -75,19 +75,23 @@ class Position:
 class UserData:
     usd: float = 0.0
     positions: list[Position] = field(default_factory=list)
+    orders: list[Position] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "UserData":
         positions = [Position.from_dict(pos) for pos in raw.get("positions", [])]
+        orders = [Position.from_dict(order) for order in raw.get("orders", [])]
         return cls(
             usd=float(raw.get("usd", 0.0)),
             positions=positions,
+            orders=orders,
         )
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "usd": self.usd,
             "positions": [pos.to_dict() for pos in self.positions],
+            "orders": [order.to_dict() for order in self.orders],
         }
 
 
@@ -173,6 +177,13 @@ def init_store():
                 changed = True
             if pos.timestamp is None:
                 pos.timestamp = now
+                changed = True
+        for order in user_data.orders:
+            if order.position_id is None:
+                order.position_id = APP_DATA.next_position_id()
+                changed = True
+            if order.timestamp is None:
+                order.timestamp = now
                 changed = True
 
     if changed:
