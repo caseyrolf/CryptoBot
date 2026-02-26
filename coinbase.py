@@ -11,6 +11,15 @@ CANDLES_URL = "https://api.exchange.coinbase.com/products/{product}/candles"
 MAX_CANDLES_PER_REQUEST = 300
 
 
+def get_prices(pairs: list[str]) -> dict[str, float]:
+    """Fetch spot price from Coinbase API for multiple pairs. each pair should be e.g. 'BTC', 'SOL'."""
+    prices: dict[str, float] = {}
+    unique_pairs = set([pair.upper() for pair in pairs])
+    for pair in unique_pairs:
+        prices[pair] = get_price(pair)
+    return prices
+
+
 def get_price(crypto: str) -> float:
     """Fetch spot price from Coinbase API. crypto should be e.g. 'BTC', 'SOL'."""
     pair = f"{crypto.upper()}-USD"
@@ -35,6 +44,8 @@ def should_liquidate(position: Position) -> bool:
         return False
 
     liq_price = position.liquidation_price()
+    if liq_price is None:
+        return False
     now = int(time.time())
     trigger_on_or_above = position.side == Direction.SHORT
     return _was_trigger_hit(
@@ -69,6 +80,34 @@ def should_fill_limit_order(order: Position) -> Optional[int]:
         )
     except ValueError:
         return None
+
+
+def should_take_profit(position: Position) -> bool:
+    if position.take_profit is None or position.tp_timestamp is None:
+        return False
+
+    trigger_on_or_above = position.side == Direction.LONG
+    return _was_trigger_hit(
+        crypto=position.crypto,
+        price=position.take_profit,
+        trigger_on_or_above=trigger_on_or_above,
+        start_ts=position.tp_timestamp,
+        stop_ts=int(time.time()),
+    )
+
+
+def should_stop_loss(position: Position) -> bool:
+    if position.stop_loss is None or position.stop_timestamp is None:
+        return False
+
+    trigger_on_or_above = position.side == Direction.SHORT
+    return _was_trigger_hit(
+        crypto=position.crypto,
+        price=position.stop_loss,
+        trigger_on_or_above=trigger_on_or_above,
+        start_ts=position.stop_timestamp,
+        stop_ts=int(time.time()),
+    )
 
 
 def _was_trigger_hit(

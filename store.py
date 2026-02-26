@@ -31,10 +31,14 @@ class Position:
     entry: float
     margin: float
     lev: int
+    take_profit: Optional[float] = None
+    stop_loss: Optional[float] = None
+    tp_timestamp: Optional[int] = None
+    stop_timestamp: Optional[int] = None
 
-    def liquidation_price(self) -> float:
+    def liquidation_price(self) -> Optional[float]:
         if self.lev <= 0:
-            raise ValueError("Leverage must be positive to compute liquidation price.")
+            return None
 
         # In this simulator's isolated-margin model, liquidation occurs after
         # an adverse move of 1 / leverage from entry.
@@ -42,6 +46,16 @@ class Position:
         if self.side == Direction.LONG:
             return self.entry * (1.0 - move)
         return self.entry * (1.0 + move)
+
+    def __str__(self) -> str:
+        liq_price = self.liquidation_price()
+        liq_str = f"${liq_price:,.2f}" if liq_price is not None else "N/A"
+        tp_str = f"${self.take_profit:,.2f}" if self.take_profit is not None else "N/A"
+        stop_str = f"${self.stop_loss:,.2f}" if self.stop_loss is not None else "N/A"
+        return (
+            f"- **{self.side.value} {self.crypto}/USDT** (ID: `{self.position_id}`) @{self.lev}x | Margin: ${self.margin:.2f} | "
+            f"Entry: ${self.entry:,.2f} | Liquidation: {liq_str} | TP: {tp_str} | Stop: {stop_str}"
+        )
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "Position":
@@ -57,6 +71,10 @@ class Position:
             entry=float(raw.get("entry", 0.0)),
             margin=float(raw.get("margin", 0.0)),
             lev=int(raw.get("lev", 0)),
+            take_profit=float(raw["take_profit"]) if raw.get("take_profit") is not None else None,
+            stop_loss=float(raw["stop_loss"]) if raw.get("stop_loss") is not None else None,
+            tp_timestamp=raw.get("tp_timestamp"),
+            stop_timestamp=raw.get("stop_timestamp"),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -68,6 +86,10 @@ class Position:
             "entry": self.entry,
             "margin": self.margin,
             "lev": self.lev,
+            "take_profit": self.take_profit,
+            "stop_loss": self.stop_loss,
+            "tp_timestamp": self.tp_timestamp,
+            "stop_timestamp": self.stop_timestamp,
         }
 
 
@@ -177,6 +199,12 @@ def init_store():
                 changed = True
             if pos.timestamp is None:
                 pos.timestamp = now
+                changed = True
+            if pos.take_profit is not None and pos.tp_timestamp is None:
+                pos.tp_timestamp = pos.timestamp
+                changed = True
+            if pos.stop_loss is not None and pos.stop_timestamp is None:
+                pos.stop_timestamp = pos.timestamp
                 changed = True
         for order in user_data.orders:
             if order.position_id is None:
